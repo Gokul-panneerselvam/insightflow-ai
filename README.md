@@ -102,32 +102,32 @@ The repository uses GitHub Actions configured in [ci-cd.yml](.github/workflows/c
 - Builds multi-stage optimized container image and pushes to ACR with `${{ github.sha }}` and `latest` tags.
 - Deploys the container to Azure Container Apps with zero-downtime rolling update.
 
----
+### Azure Infrastructure & OIDC Setup (One-time)
 
-### Azure Infrastructure Setup (One-time)
-
-Run these Azure CLI commands to provision the initial cloud resources:
+Run these Azure CLI commands to provision cloud resources and configure **OpenID Connect (OIDC)** federated credentials for passwordless, secret-free GitHub Actions deployments:
 
 ```bash
-# Set variables
-RESOURCE_GROUP="rg-insightflow-prod"
+# Variables (matching .github/workflows/ci-cd.yml)
+RESOURCE_GROUP="rg-insightflow-ai"
 LOCATION="eastus"
 ACR_NAME="acrinsightflow"
 ACA_ENV="env-insightflow"
-APP_NAME="app-insightflow-backend"
+CONTAINER_APP_NAME="insightflow-api"
+APP_REG_NAME="app-github-insightflow"
+GITHUB_ORG_REPO="<your-github-username>/<your-repo-name>" # e.g. "Gokul-panneerselvam/insightflow-ai"
 
 # 1. Create Resource Group
 az group create --name $RESOURCE_GROUP --location $LOCATION
 
 # 2. Create Azure Container Registry (ACR)
-az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic --admin-enabled true
+az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic --admin-enabled false
 
 # 3. Create Container Apps Managed Environment
 az containerapp env create --name $ACA_ENV --resource-group $RESOURCE_GROUP --location $LOCATION
 
 # 4. Create initial Azure Container App
 az containerapp create \
-  --name $APP_NAME \
+  --name $CONTAINER_APP_NAME \
   --resource-group $RESOURCE_GROUP \
   --environment $ACA_ENV \
   --image mcr.microsoft.com/k8se/quickstart:latest \
@@ -136,26 +136,44 @@ az containerapp create \
   --min-replicas 1 \
   --max-replicas 3
 
-# 5. Create Azure Service Principal for GitHub Actions
-az ad sp create-for-rbac \
-  --name "sp-insightflow-github" \
-  --role "Contributor" \
-  --scopes "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/$RESOURCE_GROUP" \
-  --json-auth
+# 5. Create Azure AD App Registration for OIDC
+APP_ID=$(az ad app create --display-name $APP_REG_NAME --query appId -o tsv)
+az ad sp create --id $APP_ID
+
+# 6. Assign Contributor Role on Resource Group and AcrPush role on ACR
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+az role assignment create --role "Contributor" --assignee $APP_ID --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+ACR_ID=$(az acr show --name $ACR_NAME --query id -o tsv)
+az role assignment create --role "AcrPush" --assignee $APP_ID --scope $ACR_ID
+
+# 7. Create OIDC Federated Identity Credential for main branch
+az ad app federated-credential create --id $APP_ID --parameters '{
+  "name": "github-actions-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:'"$GITHUB_ORG_REPO"':ref:refs/heads/main",
+  "description": "GitHub Actions OIDC deployment from main branch",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
 ```
 
 ---
 
-### Required GitHub Secrets
+### Workflow Environment Variables vs GitHub Secrets
 
-Configure these in your GitHub Repository under **Settings > Secrets and variables > Actions**:
+#### 1. Workflow Environment Variables (in `.github/workflows/ci-cd.yml`):
+```yaml
+env:
+  RESOURCE_GROUP: rg-insightflow-ai
+  ACR_NAME: acrinsightflow
+  CONTAINER_APP_NAME: insightflow-api
+  IMAGE_NAME: insightflow-ai
+```
 
-| Secret Name | Description | Example / Source |
+#### 2. Required GitHub Secrets (Only 3 OIDC Secrets):
+Configure these in GitHub under **Settings > Secrets and variables > Actions**:
+
+| Secret Name | Description | Example / CLI Source |
 | :--- | :--- | :--- |
-| `AZURE_CREDENTIALS` | JSON output from `az ad sp create-for-rbac` | `{"clientId": "...", "clientSecret": "...", ...}` |
-| `AZURE_CONTAINER_REGISTRY` | Full ACR login server | `acrinsightflow.azurecr.io` |
-| `AZURE_ACR_NAME` | ACR name | `acrinsightflow` |
-| `AZURE_REGISTRY_USERNAME` | ACR admin username / SP client ID | `acrinsightflow` |
-| `AZURE_REGISTRY_PASSWORD` | ACR admin password / SP secret | `<acr-admin-password>` |
-| `AZURE_RESOURCE_GROUP` | Target Azure Resource Group | `rg-insightflow-prod` |
-| `AZURE_CONTAINER_APP_NAME` | Target Azure Container App name | `app-insightflow-backend` |
+| `AZURE_CLIENT_ID` | Application (Client) ID of the Azure AD App | `$APP_ID` (GUID) |
+| `AZURE_TENANT_ID` | Directory (Tenant) ID of your Azure account | `az account show --query tenantId -o tsv` |
+| `AZURE_SUBSCRIPTION_ID` | Azure Subscription ID | `az account show --query id -o tsv` |
