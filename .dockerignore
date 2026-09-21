@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Virtual environments and python artifacts
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Testing and linting artifacts
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+coverage.xml
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Test suite and documentation
+tests/
+.pre-commit-config.yaml
+.github/
